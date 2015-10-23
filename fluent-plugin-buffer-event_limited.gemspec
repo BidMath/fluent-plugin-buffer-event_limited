@@ -7,7 +7,7 @@ Gem::Specification.new do |spec|
   spec.email         = ["tagomoris@gmail.com", 'gergo.sulymosi@gmail.com']
   spec.description   = %q{Fluentd memory buffer plugin with many types of chunk limits}
   spec.summary       = %q{Alternative file buffer plugin for Fluentd to realize less delay}
-  spec.homepage      = "https://github.com/trekdemo/fluent-plugin-buffer-event-limited"
+  spec.homepage      = "https://github.com/trekdemo/fluent-plugin-buffer-event_limited"
   spec.license       = "APLv2"
 
   spec.files         = `git ls-files`.split($/)
