@@ -10,8 +10,10 @@ module Fluent
     end
 
     def <<(data)
-      super
+      result = super
       @record_counter += 1
+
+      return result
     end
   end
 
