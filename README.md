@@ -1,5 +1,7 @@
 # fluent-plugin-buffer-event_limited
 
+This gem is a mutation of the [fluent-plugin-buffer-lightening](https://github.com/tagomoris/fluent-plugin-buffer-lightening) buffer plugin by [tagomoris](https://github.com/tagomoris).
+
 [Fluentd](http://fluentd.org) buffer plugin on memory to flush with many types of chunk limit methods:
   * events count limit in chunk
 
@@ -49,13 +51,3 @@ For more frequently flushing, use `flush_interval` and `try_flush_interval` with
 </match>
 ```
 
-## TODO
-
-* more limit patterns
-* patches welcome!
-
-## Copyright
-
-* Copyright (c) 2013- TAGOMORI Satoshi (tagomoris)
-* License
-  * Apache License, Version 2.0
