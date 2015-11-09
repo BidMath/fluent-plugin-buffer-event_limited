@@ -6,7 +6,7 @@ module Fluent
 
     def initialize(key, path, unique_id, mode = "a+", symlink_path = nil)
       super
-      @record_counter = %x{wc -l < "#{path}"}.to_i
+      @record_counter = File.foreach(path).inject(0) { |c, _| c + 1 }
     end
 
     def <<(data)
