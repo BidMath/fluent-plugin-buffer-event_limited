@@ -10,5 +10,4 @@ unless ENV.has_key?('VERBOSE')
 end
 
 require 'fluent/test'
-require 'fluent/plugin/buf_event_limited'
 Fluent::Test.setup
