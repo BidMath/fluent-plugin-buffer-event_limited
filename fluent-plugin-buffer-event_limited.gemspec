@@ -2,7 +2,7 @@
 
 Gem::Specification.new do |spec|
   spec.name          = "fluent-plugin-buffer-event_limited"
-  spec.version       = "0.1.1"
+  spec.version       = "0.1.2"
   spec.authors       = ["TAGOMORI Satoshi", 'Gergo Sulymosi']
   spec.email         = ["tagomoris@gmail.com", 'gergo.sulymosi@gmail.com']
   spec.description   = %q{Fluentd memory buffer plugin with many types of chunk limits}
