@@ -33,6 +33,9 @@ Options of `buffer_type file` are also available:
   buffer_type event_limited
   buffer_chunk_limit 10M
   buffer_chunk_records_limit 100
+  buffer_chunk_message_separator newline
+  # buffer_chunk_message_separator tab
+  # buffer_chunk_message_separator msgpack
   # other options...
 </match>
 ```

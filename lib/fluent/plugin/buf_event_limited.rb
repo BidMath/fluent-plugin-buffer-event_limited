@@ -4,9 +4,9 @@ module Fluent
   class EventLimitedBufferChunk < FileBufferChunk
     attr_reader :record_counter
 
-    def initialize(key, path, unique_id, mode = "a+", symlink_path = nil)
-      super
-      @record_counter = File.foreach(path).inject(0) { |c, _| c + 1 }
+    def initialize(key, path, unique_id, separator, mode = "a+", symlink_path = nil)
+      super(key, path, unique_id, mode = "a+", symlink_path = nil)
+      init_counter(path, separator)
     end
 
     def <<(data)
@@ -15,19 +15,36 @@ module Fluent
 
       return result
     end
+
+    private
+
+    def init_counter(path, separator)
+      @record_counter = \
+        case separator
+        when 'msgpack'
+          MessagePack::Unpacker.new(File.open(path)).each.inject(0) { |c, _| c + 1 }
+        when 'newline'
+          File.foreach(path, $/).inject(0) { |c, _| c + 1 }
+        when 'tab'
+          File.foreach(path, "\t").inject(0) { |c, _| c + 1 }
+        else
+          raise ArgumentError, "Separator #{separator.inspect} is not supported"
+        end
+    end
   end
 
   class EventLimitedFileBuffer < FileBuffer
     Fluent::Plugin.register_buffer('event_limited', self)
 
     config_param :buffer_chunk_records_limit, :integer, :default => Float::INFINITY
+    config_param :buffer_chunk_message_separator, :string, :default => 'msgpack'
 
     def new_chunk(key)
       encoded_key = encode_key(key)
       path, tsuffix = make_path(encoded_key, 'b')
       unique_id = tsuffix_to_unique_id(tsuffix)
 
-      EventLimitedBufferChunk.new(key, path, unique_id, 'a+', @symlink_path)
+      EventLimitedBufferChunk.new(key, path, unique_id, @buffer_chunk_message_separator, 'a+', @symlink_path)
     end
 
     # Copied here from
@@ -46,27 +63,23 @@ module Fluent
           unique_id = tsuffix_to_unique_id(tsuffix)
 
           if bq == 'b'
-            chunk = EventLimitedBufferChunk.new(key, path, unique_id, "a+")
+            chunk = EventLimitedBufferChunk.new(key, path, unique_id, @buffer_chunk_message_separator, "a+")
             maps << [timestamp, chunk]
           elsif bq == 'q'
-            chunk = EventLimitedBufferChunk.new(key, path, unique_id, "r")
+            chunk = EventLimitedBufferChunk.new(key, path, unique_id, @buffer_chunk_message_separator, "r")
             queues << [timestamp, chunk]
           end
         end
       }
 
       map = {}
-      maps.sort_by {|(timestamp,chunk)|
-        timestamp
-      }.each {|(timestamp,chunk)|
-        map[chunk.key] = chunk
-      }
+      maps
+        .sort_by { |(timestamp, chunk)| timestamp }
+        .each    { |(timestamp, chunk)| map[chunk.key] = chunk }
 
-      queue = queues.sort_by {|(timestamp,chunk)|
-        timestamp
-      }.map {|(timestamp,chunk)|
-        chunk
-      }
+      queue = queues
+        .sort_by { |(timestamp, _chunk)| timestamp }
+        .map     { |(_timestamp, chunk)| chunk }
 
       return queue, map
     end

@@ -2,6 +2,7 @@ require_relative '../test_helper'
 require 'fluent/plugin/buf_event_limited'
 require_relative 'test_event_recorder_buffered_output'
 require_relative 'dummy_chain'
+require 'msgpack'
 
 class Hash
   def corresponding_proxies
@@ -19,7 +20,7 @@ class EventLimitedFileBufferTest < Test::Unit::TestCase
   end
 
   def teardown
-    FileUtils.remove_entry_secure @buffer_path
+    FileUtils.rmdir @buffer_path
   end
 
   def default_config
@@ -28,6 +29,7 @@ class EventLimitedFileBufferTest < Test::Unit::TestCase
       flush_interval 0.1
       try_flush_interval 0.03
       buffer_chunk_records_limit 10
+      buffer_chunk_message_separator newline
       buffer_path #{@buffer_path}
     ]
   end
@@ -38,6 +40,20 @@ class EventLimitedFileBufferTest < Test::Unit::TestCase
       .configure(conf)
   end
 
+  def create_buffer_with_attributes(config = {})
+    config = {
+      'buffer_path' => @buffer_path,
+      'buffer_chunk_message_separator' => 'newline'
+    }.merge(config)
+    buf = Fluent::EventLimitedFileBuffer.new
+    Fluent::EventLimitedFileBuffer.send(:class_variable_set, :'@@buffer_paths', {})
+    buf.configure(config)
+    prefix = buf.instance_eval{ @buffer_path_prefix }
+    suffix = buf.instance_eval{ @buffer_path_suffix }
+
+    [buf, prefix, suffix]
+  end
+
   def test_plugin_configuration
     output = create_driver.instance
     buffer = output.instance_variable_get(:@buffer)
@@ -46,6 +62,7 @@ class EventLimitedFileBufferTest < Test::Unit::TestCase
     assert_equal 0.1,  output.flush_interval
     assert_equal 0.03, output.try_flush_interval
     assert_equal 10,   buffer.buffer_chunk_records_limit
+    assert_equal 'newline', buffer.buffer_chunk_message_separator
   end
 
   def test_emit
@@ -86,57 +103,113 @@ class EventLimitedFileBufferTest < Test::Unit::TestCase
     assert_equal 2, buffer.instance_variable_get(:@map)[''].record_counter
   end
 
-  def test_resume
-    buf1 = Fluent::EventLimitedFileBuffer.new
-    buf1.configure({'buffer_path' => @buffer_path})
-    prefix = buf1.instance_eval{ @buffer_path_prefix }
-    suffix = buf1.instance_eval{ @buffer_path_suffix }
-
+  def test_resume_from_plain_text_chunk
+    # Setup buffer to test chunks
+    buf1, prefix, suffix = create_buffer_with_attributes
     buf1.start
 
+    # Create chunks to test
     chunk1 = buf1.new_chunk('key1')
-    assert_equal 0, chunk1.record_counter
-    chunk1 << "data1\ndata2\n"
-
     chunk2 = buf1.new_chunk('key2')
+    assert_equal 0, chunk1.record_counter
+    assert_equal 0, chunk2.record_counter
+
+    # Write data into chunks
+    chunk1 << "data1\ndata2\n"
     chunk2 << "data3\ndata4\n"
 
-    assert chunk1
-    assert chunk1.path =~ /\A#{prefix}[-_.a-zA-Z0-9\%]+\.b[0-9a-f]+#{suffix}\Z/, "path from new_chunk must be a 'b' buffer chunk"
-
+    # Enqueue chunk1 and leave chunk2 open
     buf1.enqueue(chunk1)
-
-    assert chunk1
-    assert chunk1.path =~ /\A#{prefix}[-_.a-zA-Z0-9\%]+\.q[0-9a-f]+#{suffix}\Z/, "chunk1 must be enqueued"
-    assert chunk2
-    assert chunk2.path =~ /\A#{prefix}[-_.a-zA-Z0-9\%]+\.b[0-9a-f]+#{suffix}\Z/, "chunk2 is not enqueued yet"
-
+    assert \
+      chunk1.path =~ /\A#{prefix}[-_.a-zA-Z0-9\%]+\.q[0-9a-f]+#{suffix}\Z/,
+      "chunk1 must be enqueued"
+    assert \
+      chunk2.path =~ /\A#{prefix}[-_.a-zA-Z0-9\%]+\.b[0-9a-f]+#{suffix}\Z/,
+      "chunk2 is not enqueued yet"
     buf1.shutdown
 
-    buf2 = Fluent::EventLimitedFileBuffer.new
-    Fluent::EventLimitedFileBuffer.send(:class_variable_set, :'@@buffer_paths', {})
-    buf2.configure({'buffer_path' => @buffer_path})
-    prefix = buf2.instance_eval{ @buffer_path_prefix }
-    suffix = buf2.instance_eval{ @buffer_path_suffix }
-
-    # buf1.start -> resume is normal operation, but now, we cannot it.
+    # Setup a new buffer to test resume
+    buf2, *_ = create_buffer_with_attributes
     queue, map = buf2.resume
 
-    assert_equal 1, queue.size
-    assert_equal 1, map.size
+    # Returns with the open and the closed buffers
+    assert_equal 1, queue.size # closed buffer
+    assert_equal 1, map.values.size # open buffer
 
+    # The paths of the resumed chunks are the same but they themselfs are not
     resumed_chunk1 = queue.first
+    resumed_chunk2 = map.values.first
     assert_equal chunk1.path, resumed_chunk1.path
-    resumed_chunk2 = map['key2']
     assert_equal chunk2.path, resumed_chunk2.path
+    assert chunk1 != resumed_chunk1
+    assert chunk2 != resumed_chunk2
 
+    # Resume with the proper type of buffer chunk
     assert_equal Fluent::EventLimitedBufferChunk, resumed_chunk1.class
     assert_equal Fluent::EventLimitedBufferChunk, resumed_chunk2.class
 
-    assert_equal 2, resumed_chunk1.record_counter
-    assert_equal 2, resumed_chunk2.record_counter
-
     assert_equal "data1\ndata2\n", resumed_chunk1.read
     assert_equal "data3\ndata4\n", resumed_chunk2.read
+
+    assert_equal 2, resumed_chunk1.record_counter
+    assert_equal 2, resumed_chunk2.record_counter
+  end
+
+  def test_resume_from_msgpack_chunks
+    # Setup buffer to test chunks
+    buf1, prefix, suffix = create_buffer_with_attributes({'buffer_chunk_message_separator' => 'msgpack'})
+    buf1.start
+
+    # Create chunks to test
+    chunk1 = buf1.new_chunk('key1')
+    chunk2 = buf1.new_chunk('key2')
+    assert_equal 0, chunk1.record_counter
+    assert_equal 0, chunk2.record_counter
+
+    # Write data into chunks
+    chunk1 << MessagePack.pack('data1')
+    chunk1 << MessagePack.pack('data2')
+    chunk2 << MessagePack.pack('data3')
+    chunk2 << MessagePack.pack('data4')
+
+    # Enqueue chunk1 and leave chunk2 open
+    buf1.enqueue(chunk1)
+    assert \
+      chunk1.path =~ /\A#{prefix}[-_.a-zA-Z0-9\%]+\.q[0-9a-f]+#{suffix}\Z/,
+      "chunk1 must be enqueued"
+    assert \
+      chunk2.path =~ /\A#{prefix}[-_.a-zA-Z0-9\%]+\.b[0-9a-f]+#{suffix}\Z/,
+      "chunk2 is not enqueued yet"
+    buf1.shutdown
+
+    # Setup a new buffer to test resume
+    buf2, *_ = create_buffer_with_attributes({'buffer_chunk_message_separator' => 'msgpack'})
+    queue, map = buf2.resume
+
+    # Returns with the open and the closed buffers
+    assert_equal 1, queue.size # closed buffer
+    assert_equal 1, map.values.size # open buffer
+
+    # The paths of the resumed chunks are the same but they themselfs are not
+    resumed_chunk1 = queue.first
+    resumed_chunk2 = map.values.first
+    assert_equal chunk1.path, resumed_chunk1.path
+    assert_equal chunk2.path, resumed_chunk2.path
+    assert chunk1 != resumed_chunk1
+    assert chunk2 != resumed_chunk2
+
+    # Resume with the proper type of buffer chunk
+    assert_equal Fluent::EventLimitedBufferChunk, resumed_chunk1.class
+    assert_equal Fluent::EventLimitedBufferChunk, resumed_chunk2.class
+
+    assert_equal \
+      MessagePack.pack('data1') + MessagePack.pack('data2'),
+      resumed_chunk1.read
+    assert_equal \
+      MessagePack.pack('data3') + MessagePack.pack('data4'),
+      resumed_chunk2.read
+
+    assert_equal 2, resumed_chunk1.record_counter
+    assert_equal 2, resumed_chunk2.record_counter
   end
 end
