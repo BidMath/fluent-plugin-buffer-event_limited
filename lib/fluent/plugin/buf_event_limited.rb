@@ -6,7 +6,7 @@ module Fluent
 
     def initialize(key, path, unique_id, separator, mode = "a+", symlink_path = nil)
       super(key, path, unique_id, mode = "a+", symlink_path = nil)
-      init_counter(path, separator)
+      init_counter(separator)
     end
 
     def <<(data)
@@ -18,18 +18,22 @@ module Fluent
 
     private
 
-    def init_counter(path, separator)
-      @record_counter = \
+    def init_counter(separator)
+      old_pos = @file.pos
+      @file.rewind
+
+      @record_counter = (
         case separator
-        when 'msgpack'
-          MessagePack::Unpacker.new(File.open(path)).each.inject(0) { |c, _| c + 1 }
-        when 'newline'
-          File.foreach(path, $/).inject(0) { |c, _| c + 1 }
-        when 'tab'
-          File.foreach(path, "\t").inject(0) { |c, _| c + 1 }
+        when 'msgpack' then MessagePack::Unpacker.new(@file).each
+        when 'newline' then @file.each($/)
+        when 'tab'     then @file.each("\t")
         else
           raise ArgumentError, "Separator #{separator.inspect} is not supported"
         end
+      ).inject(0) { |c, _| c + 1 }
+
+      @file.pos = old_pos
+      $log.trace("#init_counter(#{[path, separator].join(', ')}) => #{@record_counter}")
     end
   end
 
@@ -38,6 +42,11 @@ module Fluent
 
     config_param :buffer_chunk_records_limit, :integer, :default => Float::INFINITY
     config_param :buffer_chunk_message_separator, :string, :default => 'msgpack'
+
+    def storable?(chunk, data)
+      (chunk.record_counter < @buffer_chunk_records_limit) &&
+        ((chunk.size + data.bytesize) <= @buffer_chunk_limit)
+    end
 
     def new_chunk(key)
       encoded_key = encode_key(key)
@@ -53,24 +62,25 @@ module Fluent
       maps = []
       queues = []
 
-      Dir.glob("#{@buffer_path_prefix}*#{@buffer_path_suffix}") {|path|
+      Dir.glob("#{@buffer_path_prefix}*#{@buffer_path_suffix}") do |path|
         identifier_part = chunk_identifier_in_path(path)
-        if m = PATH_MATCH.match(identifier_part)
-          key = decode_key(m[1])
-          bq = m[2]
-          tsuffix = m[3]
-          timestamp = m[3].to_i(16)
-          unique_id = tsuffix_to_unique_id(tsuffix)
+        next unless (m = PATH_MATCH.match(identifier_part))
 
-          if bq == 'b'
-            chunk = EventLimitedBufferChunk.new(key, path, unique_id, @buffer_chunk_message_separator, "a+")
-            maps << [timestamp, chunk]
-          elsif bq == 'q'
-            chunk = EventLimitedBufferChunk.new(key, path, unique_id, @buffer_chunk_message_separator, "r")
-            queues << [timestamp, chunk]
-          end
+        key = decode_key(m[1])
+        bq = m[2]
+        tsuffix = m[3]
+        timestamp = m[3].to_i(16)
+        unique_id = tsuffix_to_unique_id(tsuffix)
+
+        case bq
+        when 'b'
+          chunk = EventLimitedBufferChunk.new(key, path, unique_id, @buffer_chunk_message_separator, "a+")
+          maps << [timestamp, chunk]
+        when 'q'
+          chunk = EventLimitedBufferChunk.new(key, path, unique_id, @buffer_chunk_message_separator, "r")
+          queues << [timestamp, chunk]
         end
-      }
+      end
 
       map = {}
       maps
@@ -82,11 +92,6 @@ module Fluent
         .map     { |(_timestamp, chunk)| chunk }
 
       return queue, map
-    end
-
-    def storable?(chunk, data)
-      chunk.record_counter < @buffer_chunk_records_limit &&
-        (chunk.size + data.bytesize) <= @buffer_chunk_limit
     end
   end
 end
