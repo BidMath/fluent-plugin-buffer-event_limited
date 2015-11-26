@@ -23,13 +23,13 @@ class EventLimitedFileBufferTest < Test::Unit::TestCase
     FileUtils.rmdir @buffer_path
   end
 
-  def default_config
+  def default_config(sep = 'newline')
     %[
       buffer_type event_limited
       flush_interval 0.1
       try_flush_interval 0.03
       buffer_chunk_records_limit 10
-      buffer_chunk_message_separator newline
+      buffer_chunk_message_separator #{sep}
       buffer_path #{@buffer_path}
     ]
   end
@@ -66,41 +66,64 @@ class EventLimitedFileBufferTest < Test::Unit::TestCase
   end
 
   def test_emit
-    d = create_driver
-
+    d = create_driver(default_config('msgpack'))
     buffer = d.instance.instance_variable_get(:@buffer)
-    assert buffer
-    buffer.start
+    count_buffer_events = -> { buffer.instance_variable_get(:@map)[''].record_counter }
 
-    assert_nil buffer.instance_variable_get(:@map)['']
+    buffer.start
+    assert_nil buffer.instance_variable_get(:@map)[''], "No chunks on start"
 
     d.emit({"a" => 1})
-    assert_equal 1, buffer.instance_variable_get(:@map)[''].record_counter
+    assert_equal 1, count_buffer_events.call
 
-    d.emit({"a" => 2}); d.emit({"a" => 3}); d.emit({"a" => 4})
-    d.emit({"a" => 5}); d.emit({"a" => 6}); d.emit({"a" => 7});
-    d.emit({"a" => 8});
-    assert_equal 8, buffer.instance_variable_get(:@map)[''].record_counter
+    (2..9).each { |i| d.emit({"a" => i}) }
+    assert_equal 9, count_buffer_events.call
 
     chain = DummyChain.new
     tag = d.instance.instance_variable_get(:@tag)
     time = Time.now.to_i
 
     # flush_trigger false
-    assert !buffer.emit(tag, d.instance.format(tag, time, {"a" => 9}), chain)
-    assert_equal 9, buffer.instance_variable_get(:@map)[''].record_counter
-
-    # flush_trigger false
-    assert !buffer.emit(tag, d.instance.format(tag, time, {"a" => 10}), chain)
-    assert_equal 10, buffer.instance_variable_get(:@map)[''].record_counter
+    assert !buffer.emit(tag, d.instance.format(tag, time, {"a" => 10}), chain), "Shouldn't trigger flush"
+    assert_equal 10, count_buffer_events.call
 
     # flush_trigger true
-    assert buffer.emit(tag, d.instance.format(tag, time, {"a" => 11}), chain)
-    assert_equal 1, buffer.instance_variable_get(:@map)[''].record_counter # new chunk
+    assert buffer.emit(tag, d.instance.format(tag, time, {"a" => 11}), chain), "Should trigger flush"
+    assert_equal 1, count_buffer_events.call # new chunk
 
     # flush_trigger false
-    assert !buffer.emit(tag, d.instance.format(tag, time, {"a" => 12}), chain)
-    assert_equal 2, buffer.instance_variable_get(:@map)[''].record_counter
+    assert !buffer.emit(tag, d.instance.format(tag, time, {"a" => 12}), chain), "Shouldn't trigger flush"
+    assert_equal 2, count_buffer_events.call
+  end
+
+  def test_emit_with_oversized_streams
+    d = create_driver(default_config('msgpack'))
+    buffer = d.instance.instance_variable_get(:@buffer)
+    chain = DummyChain.new
+    tag = d.instance.instance_variable_get(:@tag)
+    time = Time.now.to_i
+    count_buffer_events = -> { buffer.instance_variable_get(:@map)[''].record_counter }
+    count_queued_buffers = -> { buffer.instance_variable_get(:@queue).size }
+
+    buffer.start
+
+    events = 21.times.map { |i| [time, {a: i}] }
+    event_stream = d.instance.format_stream(tag, events)
+    assert buffer.emit(tag, event_stream, chain), "Should trigger flush"
+    assert_equal 2, count_queued_buffers.call, "Data should fill up two buffers"
+    assert_equal 1, count_buffer_events.call, "Data should overflow into a new buffer"
+    assert buffer.instance_variable_get(:@queue).all? { |b| b.record_counter == 10 }
+  end
+
+  def test_new_chunk
+    d = create_driver
+    buffer = d.instance.instance_variable_get(:@buffer)
+
+    chunk1 = buffer.new_chunk('')
+    chunk2 = buffer.new_chunk('')
+
+    assert chunk1 != chunk2
+    assert chunk1.path != chunk2.path
   end
 
   def test_resume_from_plain_text_chunk
