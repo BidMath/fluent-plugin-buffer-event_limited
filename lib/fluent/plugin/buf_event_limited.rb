@@ -5,12 +5,12 @@ module Fluent
   class MessagePackFormattedBufferData
     attr_reader :data
 
-    def initialize(data)
-      @data = data.to_str.freeze
+    def self.pack(events)
+      events.reduce('') { |res, d| res.concat(MessagePack.pack(d)) }
     end
 
-    def records
-      @records ||= (data.empty? ? [] : unpack(data)).freeze
+    def initialize(data)
+      @data = data.to_str.freeze
     end
 
     def as_events
@@ -18,7 +18,7 @@ module Fluent
     end
 
     def size
-      @size ||= records.size
+      @size ||= reader.each.reduce(0) { |c, _| c + 1 }
     end
 
     alias_method :to_str, :data
@@ -26,8 +26,16 @@ module Fluent
 
     private
 
-    def unpack(data)
-      MessagePack::Unpacker.new(StringIO.new(data)).each.to_a
+    def records
+      @records ||= (data.empty? ? [] : unpack).freeze
+    end
+
+    def reader
+      @reader ||= MessagePack::Unpacker.new(StringIO.new(data))
+    end
+
+    def unpack
+      reader.each.to_a
     end
   end
 
@@ -81,7 +89,7 @@ module Fluent
 
           chain.next
           chunk.write(
-            event_group.map { |d| MessagePack.pack(d) }.join(''),
+            MessagePackFormattedBufferData.pack(event_group),
             event_group.size
           )
         end
