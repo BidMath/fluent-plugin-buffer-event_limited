@@ -2,38 +2,56 @@ require 'fluent/plugin/buf_file'
 require 'stringio'
 
 module Fluent
-  class EventLimitedBufferChunk < FileBufferChunk
-    attr_reader :record_counter
+  class MessagePackFormattedBufferData
+    attr_reader :data
 
-    def self.count_events(io, separator)
-      events =
-        case separator
-        when 'msgpack' then MessagePack::Unpacker.new(io).each
-        when 'newline' then io.each($/)
-        when 'tab'     then io.each("\t")
-        else fail ArgumentError, "Separator '#{separator}' is not supported"
-        end
-
-      events.inject(0) { |c, _| c + 1 }
+    def initialize(data)
+      @data = data.to_str.freeze
     end
 
-    def initialize(key, path, unique_id, separator, mode = "a+", symlink_path = nil)
-      super(key, path, unique_id, mode = "a+", symlink_path = nil)
-      @separator = separator
-      @record_counter = count_events(@file)
+    def records
+      @records ||= data.empty? ? [] : unpack(data)
     end
 
-    def <<(data)
-      result = super
-      @record_counter += count_events(StringIO.new(data))
-
-      return result
+    def as_events
+      records.dup
     end
+
+    def size
+      @size ||= records.size
+    end
+
+    alias_method :to_str, :data
+    alias_method :as_msg_pack, :data
 
     private
 
-    def count_events(io)
-      self.class.count_events(io, @separator)
+    def unpack(data)
+      MessagePack::Unpacker.new(StringIO.new(data)).each.to_a
+    end
+  end
+
+  class EventLimitedBufferChunk < FileBufferChunk
+    attr_reader :record_count, :limit
+
+    def initialize(key, path, unique_id, limit, mode = "a+")
+      super(key, path, unique_id, mode = "a+")
+      @limit = limit
+      @record_count = MessagePackFormattedBufferData.new(read).size
+    end
+
+    def <<(data, record_count)
+      super(data)
+      @record_count += record_count
+    end
+    alias_method :write, :<<
+
+    def remaining_capacity
+      @limit - record_count
+    end
+
+    def full?
+      record_count >= limit
     end
   end
 
@@ -41,47 +59,42 @@ module Fluent
     Fluent::Plugin.register_buffer('event_limited', self)
 
     config_param :buffer_chunk_records_limit, :integer, :default => Float::INFINITY
-    config_param :buffer_chunk_message_separator, :string, :default => 'msgpack'
-
-    def storable?(chunk, data)
-      event_count = chunk_class.count_events(StringIO.new(data), @buffer_chunk_message_separator)
-
-      (chunk.record_counter + event_count <= @buffer_chunk_records_limit) &&
-        ((chunk.size + data.bytesize) <= @buffer_chunk_limit)
-    end
 
     def emit(key, data, chain)
+      data = MessagePackFormattedBufferData.new(data)
       key = key.to_s
       flush_trigger = false
 
       synchronize do
-        # chunk unique id is generated in #new_chunk
         chunk = (@map[key] ||= new_chunk(key))
 
         # If the data fits the current chunk do it quickly
         if storable?(chunk, data)
           chain.next
-          chunk << data
+          chunk.write(data.as_msg_pack, data.size)
           return (flush_trigger = false)
-        end
-
-        event_stream = unpack(data)
 
         # Partition the data into chunks that can be written into new chunks
-        while !event_stream.empty?
-          # Prepare the chunk for write
-          if full?(chunk)
-            @queue.synchronize do
-              enqueue(chunk) # this is buffer enqueue *hook*
-              flush_trigger ||= @queue.empty?
-              @queue << chunk
-              chunk = (@map[key] = new_chunk(key))
+        else
+          events = data.as_events
+          [
+            events.shift(chunk.remaining_capacity),
+            *events.each_slice(@buffer_chunk_records_limit)
+          ].each do |event_group|
+            # Prepare the chunk for write
+            if chunk.full?
+              @queue.synchronize do
+                enqueue(chunk) # this is buffer enqueue *hook*
+                flush_trigger = true
+                @queue << chunk
+                chunk = (@map[key] = new_chunk(key))
+              end
             end
-          end
 
-          chain.next
-          data_chunk = event_stream.pop(remaining_storage(chunk))
-          chunk << data_chunk.map(&method(:pack)).join
+            chain.next
+            data_chunk = event_group.map { |d| MessagePack.pack(d) }.join('')
+            chunk.write(data_chunk, event_group.size)
+          end
         end
 
         return flush_trigger
@@ -134,37 +147,12 @@ module Fluent
 
     private
 
-    def unpack(data)
-      io = StringIO.new(data)
-
-      ( case @buffer_chunk_message_separator
-        when 'msgpack' then MessagePack::Unpacker.new(io).each
-        when 'newline' then io.each($/)
-        end
-      ).to_a
-    end
-
-    def pack(data)
-      case @buffer_chunk_message_separator
-      when 'msgpack' then MessagePack.pack(data)
-      when 'newline' then data.join($/)
-      end
-    end
-
-    def full?(chunk)
-      chunk.record_counter == @buffer_chunk_records_limit
-    end
-
-    def remaining_storage(chunk)
-      @buffer_chunk_records_limit - chunk.record_counter
+    def storable?(chunk, data)
+      (chunk.record_count + data.size) <= @buffer_chunk_records_limit
     end
 
     def chunk_factory(key, path, uniq_id, mode)
-      chunk_class.new(key, path, uniq_id, @buffer_chunk_message_separator, mode, @symlink_path)
-    end
-
-    def chunk_class
-      EventLimitedBufferChunk
+      EventLimitedBufferChunk.new(key, path, uniq_id, @buffer_chunk_records_limit, mode)
     end
   end
 end
