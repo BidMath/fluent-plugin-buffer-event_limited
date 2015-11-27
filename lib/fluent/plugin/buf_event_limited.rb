@@ -5,8 +5,8 @@ module Fluent
   class MessagePackFormattedBufferData
     attr_reader :data
 
-    def self.pack(events)
-      events.reduce('') { |res, d| res.concat(MessagePack.pack(d)) }
+    def self.pack(event)
+      MessagePack.pack(event)
     end
 
     def initialize(data)
@@ -14,7 +14,7 @@ module Fluent
     end
 
     def as_events
-      records.dup
+      reader.each
     end
 
     def size
@@ -26,16 +26,8 @@ module Fluent
 
     private
 
-    def records
-      @records ||= (data.empty? ? [] : unpack).freeze
-    end
-
     def reader
       @reader ||= MessagePack::Unpacker.new(StringIO.new(data))
-    end
-
-    def unpack
-      reader.each.to_a
     end
   end
 
@@ -78,24 +70,30 @@ module Fluent
         chunk = (@map[key] ||= new_chunk(key))
 
         # Partition the data into chunks that can be written into new chunks
-        events = data.as_events
-        [
-          events.shift(chunk.remaining_capacity),
-          *events.each_slice(@buffer_chunk_records_limit)
-        ].each do |event_group|
-          chunk, queue_size = rotate_chunk!(chunk, key)
-          # Trigger flush only when we put the first chunk into it
-          flush_trigger ||= (queue_size == 0)
+        data_to_write = ''
+        data_to_write_count = 0
+        data.as_events.each do |event|
+          if data_to_write_count == chunk.remaining_capacity
+            # Trigger flush only when we put the first chunk into it
+            chain.next
+            chunk.write(data_to_write, data_to_write_count)
+            chunk, queue_size = rotate_chunk!(chunk, key)
+            flush_trigger ||= (queue_size == 0)
 
-          chain.next
-          chunk.write(
-            MessagePackFormattedBufferData.pack(event_group),
-            event_group.size
-          )
+            data_to_write = ''
+            data_to_write_count = 0
+          end
+
+          data_to_write << MessagePackFormattedBufferData.pack(event)
+          data_to_write_count += 1
         end
-
-        return flush_trigger
+        # Do it for the remaining data, which will never be big enough to create
+        # a buffer overflow
+        chain.next
+        chunk.write(data_to_write, data_to_write_count)
       end
+
+      return flush_trigger
     end
 
     def new_chunk(key)
