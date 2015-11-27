@@ -5,16 +5,30 @@ module Fluent
   class MessagePackFormattedBufferData
     attr_reader :data
 
-    def self.pack(event)
-      MessagePack.pack(event)
-    end
-
     def initialize(data)
       @data = data.to_str.freeze
     end
 
-    def as_events
-      reader.each
+    # Partition the data into required sizes
+    def each_slice(target_sizes)
+      target_size = target_sizes.next
+      slice_size = 0
+      slice_data = ''
+
+      reader.each do |event|
+        if slice_size == target_size
+          yield(slice_data, slice_size)
+
+          target_size = target_sizes.next
+          slice_size = 0
+          slice_data = ''
+        end
+
+        slice_data << pack(event)
+        slice_size += 1
+      end
+
+      yield(slice_data, slice_size)
     end
 
     def size
@@ -25,6 +39,10 @@ module Fluent
     alias_method :as_msg_pack, :data
 
     private
+
+    def pack(event)
+      MessagePack.pack(event)
+    end
 
     def reader
       @reader ||= MessagePack::Unpacker.new(StringIO.new(data))
@@ -59,50 +77,6 @@ module Fluent
     Fluent::Plugin.register_buffer('event_limited', self)
 
     config_param :buffer_chunk_records_limit, :integer, :default => Float::INFINITY
-
-    def emit(key, data, chain)
-      data = MessagePackFormattedBufferData.new(data)
-      key = key.to_s
-      flush_trigger = false
-
-      synchronize do
-        # Get the active chunk if it exists
-        chunk = (@map[key] ||= new_chunk(key))
-
-        # Partition the data into chunks that can be written into new chunks
-        data_to_write = ''
-        data_to_write_count = 0
-        data.as_events.each do |event|
-          if data_to_write_count == chunk.remaining_capacity
-            # Trigger flush only when we put the first chunk into it
-            chain.next
-            chunk.write(data_to_write, data_to_write_count)
-            chunk, queue_size = rotate_chunk!(chunk, key)
-            flush_trigger ||= (queue_size == 0)
-
-            data_to_write = ''
-            data_to_write_count = 0
-          end
-
-          data_to_write << MessagePackFormattedBufferData.pack(event)
-          data_to_write_count += 1
-        end
-        # Do it for the remaining data, which will never be big enough to create
-        # a buffer overflow
-        chain.next
-        chunk.write(data_to_write, data_to_write_count)
-      end
-
-      return flush_trigger
-    end
-
-    def new_chunk(key)
-      encoded_key = encode_key(key)
-      path, tsuffix = make_path(encoded_key, 'b')
-      unique_id = tsuffix_to_unique_id(tsuffix)
-
-      chunk_factory(key, path, unique_id, 'a+')
-    end
 
     # Copied here from
     # https://github.com/fluent/fluentd/blob/d3ae305b6e7521fafac6ad30c6b0a8763c363b65/lib/fluent/plugin/buf_file.rb#L128-L165
@@ -140,7 +114,39 @@ module Fluent
       return queue, map
     end
 
+    def emit(key, data, chain)
+      data = MessagePackFormattedBufferData.new(data)
+      key = key.to_s
+      flush_trigger = false
+
+      synchronize do
+        # Get the current open chunk
+        chunk = (@map[key] ||= new_chunk(key))
+
+        data.each_slice(chunk_sizes(chunk.remaining_capacity)) do |data, size|
+          chain.next
+          chunk.write(data, size)
+          chunk, queue_size = rotate_chunk!(chunk, key)
+          flush_trigger ||= (queue_size == 0)
+        end
+      end
+
+      return flush_trigger
+    end
+
+    def new_chunk(key)
+      encoded_key = encode_key(key)
+      path, tsuffix = make_path(encoded_key, 'b')
+      unique_id = tsuffix_to_unique_id(tsuffix)
+
+      chunk_factory(key, path, unique_id, 'a+')
+    end
+
     private
+
+    def chunk_factory(key, path, uniq_id, mode)
+      EventLimitedBufferChunk.new(key, path, uniq_id, @buffer_chunk_records_limit, mode)
+    end
 
     def rotate_chunk!(chunk, key)
       queue_size = nil
@@ -156,12 +162,15 @@ module Fluent
       return chunk, queue_size
     end
 
-    def storable?(chunk, data)
-      (chunk.record_count + data.size) <= @buffer_chunk_records_limit
-    end
-
-    def chunk_factory(key, path, uniq_id, mode)
-      EventLimitedBufferChunk.new(key, path, uniq_id, @buffer_chunk_records_limit, mode)
+    # Generates infinite sequence with and initial value followed by the chunk
+    # limit
+    #
+    # Eg.: [2, 5, 5, 5, 5, 5, ...]
+    def chunk_sizes(initial_size)
+      Enumerator.new do |y|
+        y << initial_size
+        y << @buffer_chunk_records_limit while true
+      end
     end
   end
 end

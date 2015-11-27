@@ -73,24 +73,24 @@ class EventLimitedFileBufferTest < Test::Unit::TestCase
     d.emit({"a" => 1})
     assert_equal 1, count_buffer_events.call
 
-    (2..9).each { |i| d.emit({"a" => i}) }
-    assert_equal 9, count_buffer_events.call
+    (2..8).each { |i| d.emit({"a" => i}) }
+    assert_equal 8, count_buffer_events.call
 
     chain = DummyChain.new
     tag = d.instance.instance_variable_get(:@tag)
     time = Time.now.to_i
 
     # flush_trigger false
-    assert !buffer.emit(tag, d.instance.format(tag, time, {"a" => 10}), chain), "Shouldn't trigger flush"
-    assert_equal 10, count_buffer_events.call
+    assert !buffer.emit(tag, d.instance.format(tag, time, {"a" => 9}), chain), "Shouldn't trigger flush"
+    assert_equal 9, count_buffer_events.call
 
     # flush_trigger true
-    assert buffer.emit(tag, d.instance.format(tag, time, {"a" => 11}), chain), "Should trigger flush"
-    assert_equal 1, count_buffer_events.call # new chunk
+    assert buffer.emit(tag, d.instance.format(tag, time, {"a" => 10}), chain), "Should trigger flush"
+    assert_equal 0, count_buffer_events.call # new chunk
 
     # flush_trigger false
-    assert !buffer.emit(tag, d.instance.format(tag, time, {"a" => 12}), chain), "Shouldn't trigger flush"
-    assert_equal 2, count_buffer_events.call
+    assert !buffer.emit(tag, d.instance.format(tag, time, {"a" => 11}), chain), "Shouldn't trigger flush"
+    assert_equal 1, count_buffer_events.call
   end
 
   def test_emit_with_oversized_streams
