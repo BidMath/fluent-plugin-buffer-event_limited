@@ -10,7 +10,7 @@ module Fluent
     end
 
     def records
-      @records ||= data.empty? ? [] : unpack(data)
+      @records ||= (data.empty? ? [] : unpack(data)).freeze
     end
 
     def as_events
@@ -66,39 +66,28 @@ module Fluent
       flush_trigger = false
 
       synchronize do
+        # Get the active chunk if it exists
         chunk = (@map[key] ||= new_chunk(key))
 
-        # If the data fits the current chunk do it quickly
-        if storable?(chunk, data)
-          chain.next
-          chunk.write(data.as_msg_pack, data.size)
-          return (flush_trigger = false)
-
         # Partition the data into chunks that can be written into new chunks
-        else
-          events = data.as_events
-          [
-            events.shift(chunk.remaining_capacity),
-            *events.each_slice(@buffer_chunk_records_limit)
-          ].each do |event_group|
-            # Prepare the chunk for write
-            if chunk.full?
-              @queue.synchronize do
-                enqueue(chunk) # this is buffer enqueue *hook*
-                flush_trigger = true
-                @queue << chunk
-                chunk = (@map[key] = new_chunk(key))
-              end
-            end
+        events = data.as_events
+        [
+          events.shift(chunk.remaining_capacity),
+          *events.each_slice(@buffer_chunk_records_limit)
+        ].each do |event_group|
+          chunk, queue_size = rotate_chunk!(chunk, key)
+          # Trigger flush only when we put the first chunk into it
+          flush_trigger ||= (queue_size == 0)
 
-            chain.next
-            data_chunk = event_group.map { |d| MessagePack.pack(d) }.join('')
-            chunk.write(data_chunk, event_group.size)
-          end
+          chain.next
+          chunk.write(
+            event_group.map { |d| MessagePack.pack(d) }.join(''),
+            event_group.size
+          )
         end
 
         return flush_trigger
-      end  # synchronize
+      end
     end
 
     def new_chunk(key)
@@ -146,6 +135,20 @@ module Fluent
     end
 
     private
+
+    def rotate_chunk!(chunk, key)
+      queue_size = nil
+      return chunk unless chunk.full?
+
+      @queue.synchronize do
+        queue_size = @queue.size
+        enqueue(chunk) # this is buffer enqueue *hook*
+        @queue << chunk
+        chunk = (@map[key] = new_chunk(key))
+      end
+
+      return chunk, queue_size
+    end
 
     def storable?(chunk, data)
       (chunk.record_count + data.size) <= @buffer_chunk_records_limit

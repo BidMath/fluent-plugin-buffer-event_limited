@@ -112,6 +112,32 @@ class EventLimitedFileBufferTest < Test::Unit::TestCase
     assert buffer.instance_variable_get(:@queue).all? { |b| b.record_count == 10 }
   end
 
+  def test_emit_with_oversized_streams_and_ongoing_buffer_chunks
+    d = create_driver
+    buffer = d.instance.instance_variable_get(:@buffer)
+    chain = DummyChain.new
+    tag = d.instance.instance_variable_get(:@tag)
+    time = Time.now.to_i
+    count_buffer_events = -> { buffer.instance_variable_get(:@map)[''].record_count }
+    count_queued_buffers = -> { buffer.instance_variable_get(:@queue).size }
+
+    buffer.start
+
+    data_streams = [2, 21].map do |stream_size|
+      d.instance.format_stream(
+        tag,
+        stream_size.times.map { |i| [time, {a: i}] }
+      )
+    end
+
+    assert !buffer.emit(tag, data_streams[0], chain), "Should not trigger flush"
+    assert buffer.emit(tag, data_streams[1], chain), "Should trigger flush"
+
+    assert_equal 2, count_queued_buffers.call, "Data should fill up two buffers"
+    assert_equal 3, count_buffer_events.call, "Data should overflow into a new buffer"
+    assert buffer.instance_variable_get(:@queue).all? { |b| b.record_count == 10 }
+  end
+
   def test_new_chunk
     d = create_driver
     buffer = d.instance.instance_variable_get(:@buffer)
