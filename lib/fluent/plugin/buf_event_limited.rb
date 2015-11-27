@@ -1,39 +1,57 @@
 require 'fluent/plugin/buf_file'
+require 'stringio'
 
 module Fluent
-  class EventLimitedBufferChunk < FileBufferChunk
-    attr_reader :record_counter
+  class MessagePackFormattedBufferData
+    attr_reader :data
 
-    def initialize(key, path, unique_id, separator, mode = "a+", symlink_path = nil)
-      super(key, path, unique_id, mode = "a+", symlink_path = nil)
-      init_counter(separator)
+    def initialize(data)
+      @data = data.to_str.freeze
     end
 
-    def <<(data)
-      result = super
-      @record_counter += 1
-
-      return result
+    def records
+      @records ||= (data.empty? ? [] : unpack(data)).freeze
     end
+
+    def as_events
+      records.dup
+    end
+
+    def size
+      @size ||= records.size
+    end
+
+    alias_method :to_str, :data
+    alias_method :as_msg_pack, :data
 
     private
 
-    def init_counter(separator)
-      old_pos = @file.pos
-      @file.rewind
+    def unpack(data)
+      MessagePack::Unpacker.new(StringIO.new(data)).each.to_a
+    end
+  end
 
-      @record_counter = (
-        case separator
-        when 'msgpack' then MessagePack::Unpacker.new(@file).each
-        when 'newline' then @file.each($/)
-        when 'tab'     then @file.each("\t")
-        else
-          raise ArgumentError, "Separator #{separator.inspect} is not supported"
-        end
-      ).inject(0) { |c, _| c + 1 }
+  class EventLimitedBufferChunk < FileBufferChunk
+    attr_reader :record_count, :limit
 
-      @file.pos = old_pos
-      $log.trace("#init_counter(#{[path, separator].join(', ')}) => #{@record_counter}")
+    def initialize(key, path, unique_id, limit, mode = "a+")
+      super(key, path, unique_id, mode = "a+")
+      @limit = limit
+      @record_count = MessagePackFormattedBufferData.new(read).size
+    end
+
+    def <<(data, record_count)
+      super(data)
+      @record_count += record_count
+    end
+    alias_method :write, :<<
+
+    def remaining_capacity
+      @limit - record_count
+    end
+
+    def full?
+      record_count >= limit
     end
   end
 
@@ -41,11 +59,35 @@ module Fluent
     Fluent::Plugin.register_buffer('event_limited', self)
 
     config_param :buffer_chunk_records_limit, :integer, :default => Float::INFINITY
-    config_param :buffer_chunk_message_separator, :string, :default => 'msgpack'
 
-    def storable?(chunk, data)
-      (chunk.record_counter < @buffer_chunk_records_limit) &&
-        ((chunk.size + data.bytesize) <= @buffer_chunk_limit)
+    def emit(key, data, chain)
+      data = MessagePackFormattedBufferData.new(data)
+      key = key.to_s
+      flush_trigger = false
+
+      synchronize do
+        # Get the active chunk if it exists
+        chunk = (@map[key] ||= new_chunk(key))
+
+        # Partition the data into chunks that can be written into new chunks
+        events = data.as_events
+        [
+          events.shift(chunk.remaining_capacity),
+          *events.each_slice(@buffer_chunk_records_limit)
+        ].each do |event_group|
+          chunk, queue_size = rotate_chunk!(chunk, key)
+          # Trigger flush only when we put the first chunk into it
+          flush_trigger ||= (queue_size == 0)
+
+          chain.next
+          chunk.write(
+            event_group.map { |d| MessagePack.pack(d) }.join(''),
+            event_group.size
+          )
+        end
+
+        return flush_trigger
+      end
     end
 
     def new_chunk(key)
@@ -53,7 +95,7 @@ module Fluent
       path, tsuffix = make_path(encoded_key, 'b')
       unique_id = tsuffix_to_unique_id(tsuffix)
 
-      EventLimitedBufferChunk.new(key, path, unique_id, @buffer_chunk_message_separator, 'a+', @symlink_path)
+      chunk_factory(key, path, unique_id, 'a+')
     end
 
     # Copied here from
@@ -74,11 +116,9 @@ module Fluent
 
         case bq
         when 'b'
-          chunk = EventLimitedBufferChunk.new(key, path, unique_id, @buffer_chunk_message_separator, "a+")
-          maps << [timestamp, chunk]
+          maps << [timestamp, chunk_factory(key, path, unique_id, 'a+')]
         when 'q'
-          chunk = EventLimitedBufferChunk.new(key, path, unique_id, @buffer_chunk_message_separator, "r")
-          queues << [timestamp, chunk]
+          queues << [timestamp, chunk_factory(key, path, unique_id, 'r')]
         end
       end
 
@@ -92,6 +132,30 @@ module Fluent
         .map     { |(_timestamp, chunk)| chunk }
 
       return queue, map
+    end
+
+    private
+
+    def rotate_chunk!(chunk, key)
+      queue_size = nil
+      return chunk unless chunk.full?
+
+      @queue.synchronize do
+        queue_size = @queue.size
+        enqueue(chunk) # this is buffer enqueue *hook*
+        @queue << chunk
+        chunk = (@map[key] = new_chunk(key))
+      end
+
+      return chunk, queue_size
+    end
+
+    def storable?(chunk, data)
+      (chunk.record_count + data.size) <= @buffer_chunk_records_limit
+    end
+
+    def chunk_factory(key, path, uniq_id, mode)
+      EventLimitedBufferChunk.new(key, path, uniq_id, @buffer_chunk_records_limit, mode)
     end
   end
 end

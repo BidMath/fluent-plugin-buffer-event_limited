@@ -2,10 +2,9 @@
 
 This gem is a mutation of the [fluent-plugin-buffer-lightening](https://github.com/tagomoris/fluent-plugin-buffer-lightening) buffer plugin by [tagomoris](https://github.com/tagomoris).
 
-[Fluentd](http://fluentd.org) buffer plugin on memory to flush with many types of chunk limit methods:
-  * events count limit in chunk
-
-These options are to decrease latency from emit to write, and to control chunk sizes and flush sizes.
+* The buffer is able to limit the number of events that are buffered in a buffer chunk.
+* The buffer only supports output plugins that return msgpack from their `#format` methods.
+* The buffer doesn't check the bytesize of the buffers just the number of messages
 
 ## Installation
 
@@ -33,9 +32,6 @@ Options of `buffer_type file` are also available:
   buffer_type event_limited
   buffer_chunk_limit 10M
   buffer_chunk_records_limit 100
-  buffer_chunk_message_separator newline
-  # buffer_chunk_message_separator tab
-  # buffer_chunk_message_separator msgpack
   # other options...
 </match>
 ```
