@@ -2,11 +2,11 @@
 
 Gem::Specification.new do |spec|
   spec.name          = "fluent-plugin-buffer-event_limited"
-  spec.version       = "0.1.5"
-  spec.authors       = ["TAGOMORI Satoshi", 'Gergo Sulymosi']
-  spec.email         = ["tagomoris@gmail.com", 'gergo.sulymosi@gmail.com']
-  spec.description   = %q{Fluentd memory buffer plugin with many types of chunk limits}
-  spec.summary       = %q{Alternative file buffer plugin for Fluentd to realize less delay}
+  spec.version       = "0.1.6"
+  spec.authors       = ['Gergo Sulymosi']
+  spec.email         = ['gergo.sulymosi@gmail.com']
+  spec.description   = %{Fluentd memory buffer plugin with many types of chunk limits}
+  spec.summary       = %{Alternative file buffer plugin for Fluentd to limit events in a buffer not it's size}
   spec.homepage      = "https://github.com/trekdemo/fluent-plugin-buffer-event_limited"
   spec.license       = "APLv2"
 
